@@ -3,7 +3,6 @@ package node
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -11,11 +10,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pkg/errors"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/cors"
 
-	"github.com/tendermint/go-amino"
+	amino "github.com/tendermint/go-amino"
 	abci "github.com/tendermint/tendermint/abci/types"
 	bc "github.com/tendermint/tendermint/blockchain"
 	cfg "github.com/tendermint/tendermint/config"
@@ -210,35 +210,29 @@ func NewNode(config *cfg.Config,
 	// what happened during block replay).
 	state = sm.LoadState(stateDB)
 
-	// Ensure the state's block version matches that of the software.
+	// Log the version info.
+	logger.Info("Version info",
+		"software", version.TMCoreSemVer,
+		"block", version.BlockProtocol,
+		"p2p", version.P2PProtocol,
+	)
+
+	// If the state and software differ in block version, at least log it.
 	if state.Version.Consensus.Block != version.BlockProtocol {
-		return nil, fmt.Errorf(
-			"Block version of the software does not match that of the state.\n"+
-				"Got version.BlockProtocol=%v, state.Version.Consensus.Block=%v",
-			version.BlockProtocol,
-			state.Version.Consensus.Block,
+		logger.Info("Software and state have different block protocols",
+			"software", version.BlockProtocol,
+			"state", state.Version.Consensus.Block,
 		)
 	}
 
-	// If an address is provided, listen on the socket for a
-	// connection from an external signing process.
 	if config.PrivValidatorListenAddr != "" {
-		var (
-			// TODO: persist this key so external signer
-			// can actually authenticate us
-			privKey = ed25519.GenPrivKey()
-			pvsc    = privval.NewTCPVal(
-				logger.With("module", "privval"),
-				config.PrivValidatorListenAddr,
-				privKey,
-			)
-		)
-
-		if err := pvsc.Start(); err != nil {
-			return nil, fmt.Errorf("Error starting private validator client: %v", err)
+		// If an address is provided, listen on the socket for a connection from an
+		// external signing process.
+		// FIXME: we should start services inside OnStart
+		privValidator, err = createAndStartPrivValidatorSocketClient(config.PrivValidatorListenAddr, logger)
+		if err != nil {
+			return nil, errors.Wrap(err, "Error with private validator socket client")
 		}
-
-		privValidator = pvsc
 	}
 
 	// Decide whether to fast-sync or not
@@ -354,20 +348,21 @@ func NewNode(config *cfg.Config,
 	indexerService := txindex.NewIndexerService(txIndexer, eventBus)
 	indexerService.SetLogger(logger.With("module", "txindex"))
 
-	var (
-		p2pLogger = logger.With("module", "p2p")
-		nodeInfo  = makeNodeInfo(
-			config,
-			nodeKey.ID(),
-			txIndexer,
-			genDoc.ChainID,
-			p2p.NewProtocolVersion(
-				version.P2PProtocol, // global
-				state.Version.Consensus.Block,
-				state.Version.Consensus.App,
-			),
-		)
+	p2pLogger := logger.With("module", "p2p")
+	nodeInfo, err := makeNodeInfo(
+		config,
+		nodeKey.ID(),
+		txIndexer,
+		genDoc.ChainID,
+		p2p.NewProtocolVersion(
+			version.P2PProtocol, // global
+			state.Version.Consensus.Block,
+			state.Version.Consensus.App,
+		),
 	)
+	if err != nil {
+		return nil, err
+	}
 
 	// Setup Transport.
 	var (
@@ -465,7 +460,7 @@ func NewNode(config *cfg.Config,
 				Seeds:    splitAndTrimEmpty(config.P2P.Seeds, ",", " "),
 				SeedMode: config.P2P.SeedMode,
 			})
-		pexReactor.SetLogger(p2pLogger)
+		pexReactor.SetLogger(logger.With("module", "pex"))
 		sw.AddReactor("PEX", pexReactor)
 	}
 
@@ -600,10 +595,8 @@ func (n *Node) OnStop() {
 		}
 	}
 
-	if pvsc, ok := n.privValidator.(*privval.TCPVal); ok {
-		if err := pvsc.Stop(); err != nil {
-			n.Logger.Error("Error stopping priv validator socket client", "err", err)
-		}
+	if pvsc, ok := n.privValidator.(cmn.Service); ok {
+		pvsc.Stop()
 	}
 
 	if n.prometheusSrv != nil {
@@ -790,7 +783,7 @@ func makeNodeInfo(
 	txIndexer txindex.TxIndexer,
 	chainID string,
 	protocolVersion p2p.ProtocolVersion,
-) p2p.NodeInfo {
+) (p2p.NodeInfo, error) {
 	txIndexerStatus := "on"
 	if _, ok := txIndexer.(*null.TxIndex); ok {
 		txIndexerStatus = "off"
@@ -825,7 +818,8 @@ func makeNodeInfo(
 
 	nodeInfo.ListenAddr = lAddr
 
-	return nodeInfo
+	err := nodeInfo.Validate()
+	return nodeInfo, err
 }
 
 //------------------------------------------------------------------------------
@@ -855,6 +849,36 @@ func saveGenesisDoc(db dbm.DB, genDoc *types.GenesisDoc) {
 		cmn.PanicCrisis(fmt.Sprintf("Failed to save genesis doc due to marshaling error: %v", err))
 	}
 	db.SetSync(genesisDocKey, bytes)
+}
+
+func createAndStartPrivValidatorSocketClient(
+	listenAddr string,
+	logger log.Logger,
+) (types.PrivValidator, error) {
+	var pvsc types.PrivValidator
+
+	protocol, address := cmn.ProtocolAndAddress(listenAddr)
+	switch protocol {
+	case "unix":
+		pvsc = privval.NewIPCVal(logger.With("module", "privval"), address)
+	case "tcp":
+		// TODO: persist this key so external signer
+		// can actually authenticate us
+		pvsc = privval.NewTCPVal(logger.With("module", "privval"), listenAddr, ed25519.GenPrivKey())
+	default:
+		return nil, fmt.Errorf(
+			"Wrong listen address: expected either 'tcp' or 'unix' protocols, got %s",
+			protocol,
+		)
+	}
+
+	if pvsc, ok := pvsc.(cmn.Service); ok {
+		if err := pvsc.Start(); err != nil {
+			return nil, errors.Wrap(err, "failed to start")
+		}
+	}
+
+	return pvsc, nil
 }
 
 // splitAndTrimEmpty slices s into all subslices separated by sep and returns a
