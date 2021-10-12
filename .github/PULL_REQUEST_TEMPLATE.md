@@ -1,6 +1,7 @@
-<!-- Thanks for filing a PR! Before hitting the button, please check the following items.-->
+Please add a description of the changes that this PR introduces and the files that
+are the most critical to review.
 
-* [ ] Updated all relevant documentation in docs
-* [ ] Updated all code comments where relevant
-* [ ] Wrote tests
-* [ ] Updated CHANGELOG_PENDING.md
+If this PR fixes an open Issue, please include "Closes #XXX" (where "XXX" is the Issue number) 
+so that GitHub will automatically close the Issue when this PR is merged.
+
+

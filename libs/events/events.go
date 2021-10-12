@@ -3,9 +3,9 @@ package events
 
 import (
 	"fmt"
-	"sync"
 
-	cmn "github.com/tendermint/tendermint/libs/common"
+	tmsync "github.com/tendermint/tendermint/internal/libs/sync"
+	"github.com/tendermint/tendermint/libs/service"
 )
 
 // ErrListenerWasRemoved is returned by AddEvent if the listener was removed.
@@ -32,7 +32,7 @@ type Eventable interface {
 //
 // FireEvent fires an event with the given name and data.
 type Fireable interface {
-	FireEvent(event string, data EventData)
+	FireEvent(eventValue string, data EventData)
 }
 
 // EventSwitch is the interface for synchronous pubsub, where listeners
@@ -43,18 +43,18 @@ type Fireable interface {
 // They can be removed by calling either RemoveListenerForEvent or
 // RemoveListener (for all events).
 type EventSwitch interface {
-	cmn.Service
+	service.Service
 	Fireable
 
-	AddListenerForEvent(listenerID, event string, cb EventCallback) error
+	AddListenerForEvent(listenerID, eventValue string, cb EventCallback) error
 	RemoveListenerForEvent(event string, listenerID string)
 	RemoveListener(listenerID string)
 }
 
 type eventSwitch struct {
-	cmn.BaseService
+	service.BaseService
 
-	mtx        sync.RWMutex
+	mtx        tmsync.RWMutex
 	eventCells map[string]*eventCell
 	listeners  map[string]*eventListener
 }
@@ -64,7 +64,7 @@ func NewEventSwitch() EventSwitch {
 		eventCells: make(map[string]*eventCell),
 		listeners:  make(map[string]*eventListener),
 	}
-	evsw.BaseService = *cmn.NewBaseService(nil, "EventSwitch", evsw)
+	evsw.BaseService = *service.NewBaseService(nil, "EventSwitch", evsw)
 	return evsw
 }
 
@@ -74,27 +74,29 @@ func (evsw *eventSwitch) OnStart() error {
 
 func (evsw *eventSwitch) OnStop() {}
 
-func (evsw *eventSwitch) AddListenerForEvent(listenerID, event string, cb EventCallback) error {
+func (evsw *eventSwitch) AddListenerForEvent(listenerID, eventValue string, cb EventCallback) error {
 	// Get/Create eventCell and listener.
 	evsw.mtx.Lock()
-	eventCell := evsw.eventCells[event]
+
+	eventCell := evsw.eventCells[eventValue]
 	if eventCell == nil {
 		eventCell = newEventCell()
-		evsw.eventCells[event] = eventCell
+		evsw.eventCells[eventValue] = eventCell
 	}
+
 	listener := evsw.listeners[listenerID]
 	if listener == nil {
 		listener = newEventListener(listenerID)
 		evsw.listeners[listenerID] = listener
 	}
+
 	evsw.mtx.Unlock()
 
-	// Add event and listener.
-	if err := listener.AddEvent(event); err != nil {
+	if err := listener.AddEvent(eventValue); err != nil {
 		return err
 	}
-	eventCell.AddListener(listenerID, cb)
 
+	eventCell.AddListener(listenerID, cb)
 	return nil
 }
 
@@ -162,7 +164,7 @@ func (evsw *eventSwitch) FireEvent(event string, data EventData) {
 
 // eventCell handles keeping track of listener callbacks for a given event.
 type eventCell struct {
-	mtx       sync.RWMutex
+	mtx       tmsync.RWMutex
 	listeners map[string]EventCallback
 }
 
@@ -188,7 +190,7 @@ func (cell *eventCell) RemoveListener(listenerID string) int {
 
 func (cell *eventCell) FireEvent(data EventData) {
 	cell.mtx.RLock()
-	var eventCallbacks []EventCallback
+	eventCallbacks := make([]EventCallback, 0, len(cell.listeners))
 	for _, cb := range cell.listeners {
 		eventCallbacks = append(eventCallbacks, cb)
 	}
@@ -206,7 +208,7 @@ type EventCallback func(data EventData)
 type eventListener struct {
 	id string
 
-	mtx     sync.RWMutex
+	mtx     tmsync.RWMutex
 	removed bool
 	events  []string
 }

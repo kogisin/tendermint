@@ -2,23 +2,28 @@ package testsuite
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
+	mrand "math/rand"
 
-	abcicli "github.com/tendermint/tendermint/abci/client"
+	abciclient "github.com/tendermint/tendermint/abci/client"
 	"github.com/tendermint/tendermint/abci/types"
-	cmn "github.com/tendermint/tendermint/libs/common"
+	tmrand "github.com/tendermint/tendermint/libs/rand"
 )
 
-func InitChain(client abcicli.Client) error {
+var ctx = context.Background()
+
+func InitChain(client abciclient.Client) error {
 	total := 10
 	vals := make([]types.ValidatorUpdate, total)
 	for i := 0; i < total; i++ {
-		pubkey := cmn.RandBytes(33)
-		power := cmn.RandInt()
-		vals[i] = types.Ed25519ValidatorUpdate(pubkey, int64(power))
+		pubkey := tmrand.Bytes(33)
+		// nolint:gosec // G404: Use of weak random number generator
+		power := mrand.Int()
+		vals[i] = types.UpdateValidator(pubkey, int64(power), "")
 	}
-	_, err := client.InitChainSync(types.RequestInitChain{
+	_, err := client.InitChainSync(ctx, types.RequestInitChain{
 		Validators: vals,
 	})
 	if err != nil {
@@ -29,19 +34,8 @@ func InitChain(client abcicli.Client) error {
 	return nil
 }
 
-func SetOption(client abcicli.Client, key, value string) error {
-	_, err := client.SetOptionSync(types.RequestSetOption{Key: key, Value: value})
-	if err != nil {
-		fmt.Println("Failed test: SetOption")
-		fmt.Printf("error while setting %v=%v: \nerror: %v\n", key, value, err)
-		return err
-	}
-	fmt.Println("Passed test: SetOption")
-	return nil
-}
-
-func Commit(client abcicli.Client, hashExp []byte) error {
-	res, err := client.CommitSync()
+func Commit(client abciclient.Client, hashExp []byte) error {
+	res, err := client.CommitSync(ctx)
 	data := res.Data
 	if err != nil {
 		fmt.Println("Failed test: Commit")
@@ -51,45 +45,45 @@ func Commit(client abcicli.Client, hashExp []byte) error {
 	if !bytes.Equal(data, hashExp) {
 		fmt.Println("Failed test: Commit")
 		fmt.Printf("Commit hash was unexpected. Got %X expected %X\n", data, hashExp)
-		return errors.New("CommitTx failed")
+		return errors.New("commitTx failed")
 	}
 	fmt.Println("Passed test: Commit")
 	return nil
 }
 
-func DeliverTx(client abcicli.Client, txBytes []byte, codeExp uint32, dataExp []byte) error {
-	res, _ := client.DeliverTxSync(txBytes)
+func DeliverTx(client abciclient.Client, txBytes []byte, codeExp uint32, dataExp []byte) error {
+	res, _ := client.DeliverTxSync(ctx, types.RequestDeliverTx{Tx: txBytes})
 	code, data, log := res.Code, res.Data, res.Log
 	if code != codeExp {
 		fmt.Println("Failed test: DeliverTx")
 		fmt.Printf("DeliverTx response code was unexpected. Got %v expected %v. Log: %v\n",
 			code, codeExp, log)
-		return errors.New("DeliverTx error")
+		return errors.New("deliverTx error")
 	}
 	if !bytes.Equal(data, dataExp) {
 		fmt.Println("Failed test: DeliverTx")
 		fmt.Printf("DeliverTx response data was unexpected. Got %X expected %X\n",
 			data, dataExp)
-		return errors.New("DeliverTx error")
+		return errors.New("deliverTx error")
 	}
 	fmt.Println("Passed test: DeliverTx")
 	return nil
 }
 
-func CheckTx(client abcicli.Client, txBytes []byte, codeExp uint32, dataExp []byte) error {
-	res, _ := client.CheckTxSync(txBytes)
+func CheckTx(client abciclient.Client, txBytes []byte, codeExp uint32, dataExp []byte) error {
+	res, _ := client.CheckTxSync(ctx, types.RequestCheckTx{Tx: txBytes})
 	code, data, log := res.Code, res.Data, res.Log
 	if code != codeExp {
 		fmt.Println("Failed test: CheckTx")
 		fmt.Printf("CheckTx response code was unexpected. Got %v expected %v. Log: %v\n",
 			code, codeExp, log)
-		return errors.New("CheckTx")
+		return errors.New("checkTx")
 	}
 	if !bytes.Equal(data, dataExp) {
 		fmt.Println("Failed test: CheckTx")
 		fmt.Printf("CheckTx response data was unexpected. Got %X expected %X\n",
 			data, dataExp)
-		return errors.New("CheckTx")
+		return errors.New("checkTx")
 	}
 	fmt.Println("Passed test: CheckTx")
 	return nil

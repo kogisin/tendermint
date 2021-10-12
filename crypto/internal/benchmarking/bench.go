@@ -24,10 +24,10 @@ func (zeroReader) Read(buf []byte) (int, error) {
 
 // BenchmarkKeyGeneration benchmarks the given key generation algorithm using
 // a dummy reader.
-func BenchmarkKeyGeneration(b *testing.B, GenerateKey func(reader io.Reader) crypto.PrivKey) {
+func BenchmarkKeyGeneration(b *testing.B, generateKey func(reader io.Reader) crypto.PrivKey) {
 	var zero zeroReader
 	for i := 0; i < b.N; i++ {
-		GenerateKey(zero)
+		generateKey(zero)
 	}
 }
 
@@ -37,7 +37,11 @@ func BenchmarkSigning(b *testing.B, priv crypto.PrivKey) {
 	message := []byte("Hello, world!")
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		priv.Sign(message)
+		_, err := priv.Sign(message)
+
+		if err != nil {
+			b.FailNow()
+		}
 	}
 }
 
@@ -53,7 +57,7 @@ func BenchmarkVerification(b *testing.B, priv crypto.PrivKey) {
 	}
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		pub.VerifyBytes(message, signature)
+		pub.VerifySignature(message, signature)
 	}
 }
 

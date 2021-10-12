@@ -15,15 +15,7 @@ import (
 
 	cfg "github.com/tendermint/tendermint/config"
 	"github.com/tendermint/tendermint/libs/cli"
-	cmn "github.com/tendermint/tendermint/libs/common"
-)
-
-var (
-	defaultRoot = os.ExpandEnv("$HOME/.some/test/dir")
-)
-
-const (
-	rootName = "root"
+	tmos "github.com/tendermint/tendermint/libs/os"
 )
 
 // clearConfig clears env vars, the given root dir, and resets viper.
@@ -56,10 +48,10 @@ func testRootCmd() *cobra.Command {
 }
 
 func testSetup(rootDir string, args []string, env map[string]string) error {
-	clearConfig(defaultRoot)
+	clearConfig(rootDir)
 
 	rootCmd := testRootCmd()
-	cmd := cli.PrepareBaseCmd(rootCmd, "TM", defaultRoot)
+	cmd := cli.PrepareBaseCmd(rootCmd, "TM", rootDir)
 
 	// run with the args and env
 	args = append([]string{rootCmd.Use}, args...)
@@ -67,6 +59,7 @@ func testSetup(rootDir string, args []string, env map[string]string) error {
 }
 
 func TestRootHome(t *testing.T) {
+	defaultRoot := t.TempDir()
 	newRoot := filepath.Join(defaultRoot, "something-else")
 	cases := []struct {
 		args []string
@@ -103,12 +96,13 @@ func TestRootFlagsEnv(t *testing.T) {
 		logLevel string
 	}{
 		{[]string{"--log", "debug"}, nil, defaultLogLvl},                 // wrong flag
-		{[]string{"--log_level", "debug"}, nil, "debug"},                 // right flag
+		{[]string{"--log-level", "debug"}, nil, "debug"},                 // right flag
 		{nil, map[string]string{"TM_LOW": "debug"}, defaultLogLvl},       // wrong env flag
 		{nil, map[string]string{"MT_LOG_LEVEL": "debug"}, defaultLogLvl}, // wrong env prefix
 		{nil, map[string]string{"TM_LOG_LEVEL": "debug"}, "debug"},       // right env
 	}
 
+	defaultRoot := t.TempDir()
 	for i, tc := range cases {
 		idxString := strconv.Itoa(i)
 
@@ -122,9 +116,9 @@ func TestRootFlagsEnv(t *testing.T) {
 func TestRootConfig(t *testing.T) {
 
 	// write non-default config
-	nonDefaultLogLvl := "abc:debug"
+	nonDefaultLogLvl := "debug"
 	cvals := map[string]string{
-		"log_level": nonDefaultLogLvl,
+		"log-level": nonDefaultLogLvl,
 	}
 
 	cases := []struct {
@@ -133,18 +127,19 @@ func TestRootConfig(t *testing.T) {
 
 		logLvl string
 	}{
-		{nil, nil, nonDefaultLogLvl},                                     // should load config
-		{[]string{"--log_level=abc:info"}, nil, "abc:info"},              // flag over rides
-		{nil, map[string]string{"TM_LOG_LEVEL": "abc:info"}, "abc:info"}, // env over rides
+		{nil, nil, nonDefaultLogLvl},                             // should load config
+		{[]string{"--log-level=info"}, nil, "info"},              // flag over rides
+		{nil, map[string]string{"TM_LOG_LEVEL": "info"}, "info"}, // env over rides
 	}
 
 	for i, tc := range cases {
+		defaultRoot := t.TempDir()
 		idxString := strconv.Itoa(i)
 		clearConfig(defaultRoot)
 
 		// XXX: path must match cfg.defaultConfigPath
 		configFilePath := filepath.Join(defaultRoot, "config")
-		err := cmn.EnsureDir(configFilePath, 0700)
+		err := tmos.EnsureDir(configFilePath, 0700)
 		require.Nil(t, err)
 
 		// write the non-defaults to a different path
@@ -169,8 +164,8 @@ func TestRootConfig(t *testing.T) {
 func WriteConfigVals(dir string, vals map[string]string) error {
 	data := ""
 	for k, v := range vals {
-		data = data + fmt.Sprintf("%s = \"%s\"\n", k, v)
+		data += fmt.Sprintf("%s = \"%s\"\n", k, v)
 	}
 	cfile := filepath.Join(dir, "config.toml")
-	return ioutil.WriteFile(cfile, []byte(data), 0666)
+	return ioutil.WriteFile(cfile, []byte(data), 0600)
 }

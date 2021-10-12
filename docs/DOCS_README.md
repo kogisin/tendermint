@@ -2,20 +2,27 @@
 
 The documentation for Tendermint Core is hosted at:
 
-- https://tendermint.com/docs/ and
-- https://tendermint-staging.interblock.io/docs/
+- <https://docs.tendermint.com/>
 
-built from the files in this (`/docs`) directory for
-[master](https://github.com/tendermint/tendermint/tree/master/docs)
-and [develop](https://github.com/tendermint/tendermint/tree/develop/docs),
-respectively.
+built from the files in this [`docs` directory for `master`](https://github.com/tendermint/tendermint/tree/master/docs)
+and other supported release branches.
 
 ## How It Works
 
-There is a CircleCI job listening for changes in the `/docs` directory, on both
-the  `master` and `develop` branches. Any updates to files in this directory
-on those branches will automatically trigger a website deployment. Under the hood,
-the private website repository has a `make build-docs` target consumed by a CircleCI job in that repo.
+There is a [GitHub Actions workflow](https://github.com/tendermint/docs/actions/workflows/deployment.yml)
+in the `tendermint/docs` repository that clones and builds the documentation
+site from the contents of this `docs` directory, for `master` and for each
+supported release branch. Under the hood, this workflow runs `make build-docs`
+from the [Makefile](../Makefile#L214).
+
+The list of supported versions are defined in [`config.js`](./.vuepress/config.js),
+which defines the UI menu on the documentation site, and also in
+[`docs/versions`](./versions), which determines which branches are built.
+
+The last entry in the `docs/versions` file determines which version is linked
+by default from the generated `index.html`. This should generally be the most
+recent release, rather than `master`, so that new users are not confused by
+documentation for unreleased features.
 
 ## README
 
@@ -35,7 +42,7 @@ of the sidebar.
 **NOTE:** Strongly consider the existing links - both within this directory
 and to the website docs - when moving or deleting files.
 
-Links to directories *MUST* end in a `/`.
+Links to directories _MUST_ end in a `/`.
 
 Relative links should be used nearly everywhere, having discovered and weighed the following:
 
@@ -62,36 +69,31 @@ to send users to the GitHub.
 
 ## Building Locally
 
-To build and serve the documentation locally, run:
+Make sure you are in the `docs` directory and run the following commands:
 
+```bash
+rm -rf node_modules
 ```
-# from this directory
+
+This command will remove old version of the visual theme and required packages. This step is optional.
+
+```bash
 npm install
-npm install -g vuepress
 ```
 
-then change the following line in the `config.js`:
+Install the theme and all dependencies.
 
-```
-base: "/docs/",
-```
-
-to:
-
-```
-base: "/",
+```bash
+npm run serve
 ```
 
-Finally, go up one directory to the root of the repo and run:
+<!-- markdown-link-check-disable -->
 
-```
-# from root of repo
-vuepress build docs
-cd dist/docs
-python -m SimpleHTTPServer 8080
-```
+Run `pre` and `post` hooks and start a hot-reloading web-server. See output of this command for the URL (it is often <https://localhost:8080>).
 
-then navigate to localhost:8080 in your browser.
+<!-- markdown-link-check-enable -->
+
+To build documentation as a static website run `npm run build`. You will find the website in `.vuepress/dist` directory.
 
 ## Search
 
@@ -100,4 +102,4 @@ We are using [Algolia](https://www.algolia.com) to power full-text search. This 
 ## Consistency
 
 Because the build processes are identical (as is the information contained herein), this file should be kept in sync as
-much as possible with its [counterpart in the Cosmos SDK repo](https://github.com/cosmos/cosmos-sdk/blob/develop/docs/DOCS_README.md).
+much as possible with its [counterpart in the Cosmos SDK repo](https://github.com/cosmos/cosmos-sdk/blob/master/docs/DOCS_README.md).

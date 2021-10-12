@@ -6,10 +6,10 @@ import (
 	"encoding/json"
 	"fmt"
 
+	dbm "github.com/tendermint/tm-db"
+
 	"github.com/tendermint/tendermint/abci/example/code"
 	"github.com/tendermint/tendermint/abci/types"
-	cmn "github.com/tendermint/tendermint/libs/common"
-	dbm "github.com/tendermint/tendermint/libs/db"
 	"github.com/tendermint/tendermint/version"
 )
 
@@ -17,7 +17,7 @@ var (
 	stateKey        = []byte("stateKey")
 	kvPairPrefixKey = []byte("kvPairKey:")
 
-	ProtocolVersion version.Protocol = 0x1
+	ProtocolVersion uint64 = 0x1
 )
 
 type State struct {
@@ -28,15 +28,19 @@ type State struct {
 }
 
 func loadState(db dbm.DB) State {
-	stateBytes := db.Get(stateKey)
 	var state State
-	if len(stateBytes) != 0 {
-		err := json.Unmarshal(stateBytes, &state)
-		if err != nil {
-			panic(err)
-		}
-	}
 	state.db = db
+	stateBytes, err := db.Get(stateKey)
+	if err != nil {
+		panic(err)
+	}
+	if len(stateBytes) == 0 {
+		return state
+	}
+	err = json.Unmarshal(stateBytes, &state)
+	if err != nil {
+		panic(err)
+	}
 	return state
 }
 
@@ -45,7 +49,10 @@ func saveState(state State) {
 	if err != nil {
 		panic(err)
 	}
-	state.db.Set(stateKey, stateBytes)
+	err = state.db.Set(stateKey, stateBytes)
+	if err != nil {
+		panic(err)
+	}
 }
 
 func prefixKey(key []byte) []byte {
@@ -54,81 +61,113 @@ func prefixKey(key []byte) []byte {
 
 //---------------------------------------------------
 
-var _ types.Application = (*KVStoreApplication)(nil)
+var _ types.Application = (*Application)(nil)
 
-type KVStoreApplication struct {
+type Application struct {
 	types.BaseApplication
 
-	state State
+	state        State
+	RetainBlocks int64 // blocks to retain after commit (via ResponseCommit.RetainHeight)
 }
 
-func NewKVStoreApplication() *KVStoreApplication {
+func NewApplication() *Application {
 	state := loadState(dbm.NewMemDB())
-	return &KVStoreApplication{state: state}
+	return &Application{state: state}
 }
 
-func (app *KVStoreApplication) Info(req types.RequestInfo) (resInfo types.ResponseInfo) {
+func (app *Application) Info(req types.RequestInfo) (resInfo types.ResponseInfo) {
 	return types.ResponseInfo{
-		Data:       fmt.Sprintf("{\"size\":%v}", app.state.Size),
-		Version:    version.ABCIVersion,
-		AppVersion: ProtocolVersion.Uint64(),
+		Data:             fmt.Sprintf("{\"size\":%v}", app.state.Size),
+		Version:          version.ABCIVersion,
+		AppVersion:       ProtocolVersion,
+		LastBlockHeight:  app.state.Height,
+		LastBlockAppHash: app.state.AppHash,
 	}
 }
 
 // tx is either "key=value" or just arbitrary bytes
-func (app *KVStoreApplication) DeliverTx(tx []byte) types.ResponseDeliverTx {
-	var key, value []byte
-	parts := bytes.Split(tx, []byte("="))
-	if len(parts) == 2 {
-		key, value = parts[0], parts[1]
-	} else {
-		key, value = tx, tx
-	}
-	app.state.db.Set(prefixKey(key), value)
-	app.state.Size += 1
+func (app *Application) DeliverTx(req types.RequestDeliverTx) types.ResponseDeliverTx {
+	var key, value string
 
-	tags := []cmn.KVPair{
-		{Key: []byte("app.creator"), Value: []byte("Cosmoshi Netowoko")},
-		{Key: []byte("app.key"), Value: key},
+	parts := bytes.Split(req.Tx, []byte("="))
+	if len(parts) == 2 {
+		key, value = string(parts[0]), string(parts[1])
+	} else {
+		key, value = string(req.Tx), string(req.Tx)
 	}
-	return types.ResponseDeliverTx{Code: code.CodeTypeOK, Tags: tags}
+
+	err := app.state.db.Set(prefixKey([]byte(key)), []byte(value))
+	if err != nil {
+		panic(err)
+	}
+	app.state.Size++
+
+	events := []types.Event{
+		{
+			Type: "app",
+			Attributes: []types.EventAttribute{
+				{Key: "creator", Value: "Cosmoshi Netowoko", Index: true},
+				{Key: "key", Value: key, Index: true},
+				{Key: "index_key", Value: "index is working", Index: true},
+				{Key: "noindex_key", Value: "index is working", Index: false},
+			},
+		},
+	}
+
+	return types.ResponseDeliverTx{Code: code.CodeTypeOK, Events: events}
 }
 
-func (app *KVStoreApplication) CheckTx(tx []byte) types.ResponseCheckTx {
+func (app *Application) CheckTx(req types.RequestCheckTx) types.ResponseCheckTx {
 	return types.ResponseCheckTx{Code: code.CodeTypeOK, GasWanted: 1}
 }
 
-func (app *KVStoreApplication) Commit() types.ResponseCommit {
+func (app *Application) Commit() types.ResponseCommit {
 	// Using a memdb - just return the big endian size of the db
 	appHash := make([]byte, 8)
 	binary.PutVarint(appHash, app.state.Size)
 	app.state.AppHash = appHash
-	app.state.Height += 1
+	app.state.Height++
 	saveState(app.state)
-	return types.ResponseCommit{Data: appHash}
+
+	resp := types.ResponseCommit{Data: appHash}
+	if app.RetainBlocks > 0 && app.state.Height >= app.RetainBlocks {
+		resp.RetainHeight = app.state.Height - app.RetainBlocks + 1
+	}
+	return resp
 }
 
-func (app *KVStoreApplication) Query(reqQuery types.RequestQuery) (resQuery types.ResponseQuery) {
+// Returns an associated value or nil if missing.
+func (app *Application) Query(reqQuery types.RequestQuery) (resQuery types.ResponseQuery) {
 	if reqQuery.Prove {
-		value := app.state.db.Get(prefixKey(reqQuery.Data))
+		value, err := app.state.db.Get(prefixKey(reqQuery.Data))
+		if err != nil {
+			panic(err)
+		}
+		if value == nil {
+			resQuery.Log = "does not exist"
+		} else {
+			resQuery.Log = "exists"
+		}
 		resQuery.Index = -1 // TODO make Proof return index
 		resQuery.Key = reqQuery.Data
 		resQuery.Value = value
-		if value != nil {
-			resQuery.Log = "exists"
-		} else {
-			resQuery.Log = "does not exist"
-		}
-		return
-	} else {
-		resQuery.Key = reqQuery.Data
-		value := app.state.db.Get(prefixKey(reqQuery.Data))
-		resQuery.Value = value
-		if value != nil {
-			resQuery.Log = "exists"
-		} else {
-			resQuery.Log = "does not exist"
-		}
+		resQuery.Height = app.state.Height
+
 		return
 	}
+
+	resQuery.Key = reqQuery.Data
+	value, err := app.state.db.Get(prefixKey(reqQuery.Data))
+	if err != nil {
+		panic(err)
+	}
+	if value == nil {
+		resQuery.Log = "does not exist"
+	} else {
+		resQuery.Log = "exists"
+	}
+	resQuery.Value = value
+	resQuery.Height = app.state.Height
+
+	return resQuery
 }

@@ -6,8 +6,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	abci "github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/libs/log"
-
 	"github.com/tendermint/tendermint/libs/pubsub"
 	"github.com/tendermint/tendermint/libs/pubsub/query"
 )
@@ -15,14 +15,28 @@ import (
 func TestExample(t *testing.T) {
 	s := pubsub.NewServer()
 	s.SetLogger(log.TestingLogger())
-	s.Start()
-	defer s.Stop()
+
+	require.NoError(t, s.Start())
+
+	t.Cleanup(func() {
+		if err := s.Stop(); err != nil {
+			t.Error(err)
+		}
+	})
 
 	ctx := context.Background()
-	ch := make(chan interface{}, 1)
-	err := s.Subscribe(ctx, "example-client", query.MustParse("abci.account.name='John'"), ch)
+
+	subscription, err := s.Subscribe(ctx, "example-client", query.MustParse("abci.account.name='John'"))
 	require.NoError(t, err)
-	err = s.PublishWithTags(ctx, "Tombstone", pubsub.NewTagMap(map[string]string{"abci.account.name": "John"}))
+
+	events := []abci.Event{
+		{
+			Type:       "abci.account",
+			Attributes: []abci.EventAttribute{{Key: "name", Value: "John"}},
+		},
+	}
+	err = s.PublishWithEvents(ctx, "Tombstone", events)
 	require.NoError(t, err)
-	assertReceive(t, "Tombstone", ch)
+
+	assertReceive(t, "Tombstone", subscription.Out())
 }

@@ -3,16 +3,53 @@ package query_test
 import (
 	"testing"
 
-	"github.com/stretchr/testify/assert"
-
-	"github.com/tendermint/tendermint/libs/pubsub"
+	"github.com/stretchr/testify/require"
+	abci "github.com/tendermint/tendermint/abci/types"
 	"github.com/tendermint/tendermint/libs/pubsub/query"
 )
 
 func TestEmptyQueryMatchesAnything(t *testing.T) {
 	q := query.Empty{}
-	assert.True(t, q.Matches(pubsub.NewTagMap(map[string]string{})))
-	assert.True(t, q.Matches(pubsub.NewTagMap(map[string]string{"Asher": "Roth"})))
-	assert.True(t, q.Matches(pubsub.NewTagMap(map[string]string{"Route": "66"})))
-	assert.True(t, q.Matches(pubsub.NewTagMap(map[string]string{"Route": "66", "Billy": "Blue"})))
+
+	testCases := []struct {
+		events []abci.Event
+	}{
+		{
+			[]abci.Event{},
+		},
+		{
+			[]abci.Event{
+				{
+					Type:       "Asher",
+					Attributes: []abci.EventAttribute{{Key: "Roth"}},
+				},
+			},
+		},
+		{
+			[]abci.Event{
+				{
+					Type:       "Route",
+					Attributes: []abci.EventAttribute{{Key: "66"}},
+				},
+			},
+		},
+		{
+			[]abci.Event{
+				{
+					Type:       "Route",
+					Attributes: []abci.EventAttribute{{Key: "66"}},
+				},
+				{
+					Type:       "Billy",
+					Attributes: []abci.EventAttribute{{Key: "Blue"}},
+				},
+			},
+		},
+	}
+
+	for _, tc := range testCases {
+		match, err := q.Matches(tc.events)
+		require.Nil(t, err)
+		require.True(t, match)
+	}
 }

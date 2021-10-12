@@ -1,40 +1,22 @@
 {
-  "dependencies": {
-    "prettier": "^1.13.7",
-    "remark-cli": "^5.0.0",
-    "remark-lint-no-dead-urls": "^0.3.0",
-    "remark-lint-write-good": "^1.0.3",
-    "textlint": "^10.2.1",
-    "textlint-rule-stop-words": "^1.0.3"
-  },
-  "name": "tendermint",
+  "name": "docs",
+  "version": "1.0.0",
   "description": "Tendermint Core Documentation",
-  "version": "0.0.1",
-  "main": "README.md",
-  "devDependencies": {},
+  "main": "index.js",
+  "dependencies": {
+    "vuepress-theme-cosmos": "^1.0.182"
+  },
+  "devDependencies": {
+    "watchpack": "^2.2.0"
+  },
   "scripts": {
-    "lint:json": "prettier \"**/*.json\" --write",
-    "lint:md": "prettier \"**/*.md\" --write && remark . && textlint \"md/**\"",
-    "lint": "yarn lint:json && yarn lint:md"
+    "preserve": "./pre.sh",
+    "serve": "trap 'exit 0' SIGINT; vuepress dev --no-cache",
+    "postserve": "./post.sh",
+    "prebuild": "./pre.sh",
+    "build": "trap 'exit 0' SIGINT; vuepress build --no-cache",
+    "postbuild": "./post.sh"
   },
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/tendermint/tendermint.git"
-  },
-  "keywords": [
-    "tendermint",
-    "blockchain"
-  ],
-  "author": "Tendermint",
-  "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/tendermint/tendermint/issues"
-  },
-  "homepage": "https://tendermint.com/docs/",
-  "remarkConfig": {
-    "plugins": [
-      "remark-lint-no-dead-urls",
-      "remark-lint-write-good"
-    ]
-  }
+  "author": "",
+  "license": "ISC"
 }

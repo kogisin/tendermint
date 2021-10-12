@@ -10,41 +10,25 @@
 // match, this message will be pushed to all clients, subscribed to that query.
 // See query subpackage for our implementation.
 //
-// Due to the blocking send implementation, a single subscriber can freeze an
-// entire server by not reading messages before it unsubscribes. To avoid such
-// scenario, subscribers must either:
+// Example:
 //
-// a) make sure they continue to read from the out channel until
-// Unsubscribe(All) is called
+//     q, err := query.New("account.name='John'")
+//     if err != nil {
+//         return err
+//     }
+//     ctx, cancel := context.WithTimeout(context.Background(), 1 * time.Second)
+//     defer cancel()
+//     subscription, err := pubsub.Subscribe(ctx, "johns-transactions", q)
+//     if err != nil {
+//         return err
+//     }
 //
-//     s.Subscribe(ctx, sub, qry, out)
-//     go func() {
-//         for msg := range out {
-//             // handle msg
-//             // will exit automatically when out is closed by Unsubscribe(All)
-//         }
-//     }()
-//     s.UnsubscribeAll(ctx, sub)
-//
-// b) drain the out channel before calling Unsubscribe(All)
-//
-//     s.Subscribe(ctx, sub, qry, out)
-//     defer func() {
-//         // drain out to make sure we don't block
-//     LOOP:
-//		     for {
-// 		     	   select {
-// 		     	   case <-out:
-// 		     	   default:
-// 		     	   	   break LOOP
-// 		     	   }
-// 		     }
-//         s.UnsubscribeAll(ctx, sub)
-//     }()
-//     for msg := range out {
-//         // handle msg
-//         if err != nil {
-//            return err
+//     for {
+//         select {
+//         case msg <- subscription.Out():
+//             // handle msg.Data() and msg.Events()
+//         case <-subscription.Canceled():
+//             return subscription.Err()
 //         }
 //     }
 //
@@ -53,9 +37,12 @@ package pubsub
 import (
 	"context"
 	"errors"
-	"sync"
+	"fmt"
 
-	cmn "github.com/tendermint/tendermint/libs/common"
+	"github.com/tendermint/tendermint/abci/types"
+	tmsync "github.com/tendermint/tendermint/internal/libs/sync"
+	"github.com/tendermint/tendermint/libs/pubsub/query"
+	"github.com/tendermint/tendermint/libs/service"
 )
 
 type operation int
@@ -77,75 +64,77 @@ var (
 	ErrAlreadySubscribed = errors.New("already subscribed")
 )
 
-type cmd struct {
-	op       operation
-	query    Query
-	ch       chan<- interface{}
-	clientID string
-	msg      interface{}
-	tags     TagMap
-}
-
-// Query defines an interface for a query to be used for subscribing.
+// Query defines an interface for a query to be used for subscribing. A query
+// matches against a map of events. Each key in this map is a composite of the
+// even type and an attribute key (e.g. "{eventType}.{eventAttrKey}") and the
+// values are the event values that are contained under that relationship. This
+// allows event types to repeat themselves with the same set of keys and
+// different values.
 type Query interface {
-	Matches(tags TagMap) bool
+	Matches(events []types.Event) (bool, error)
 	String() string
 }
 
+type UnsubscribeArgs struct {
+	ID         string
+	Subscriber string
+	Query      Query
+}
+
+func (args UnsubscribeArgs) Validate() error {
+	if args.Subscriber == "" {
+		return errors.New("must specify a subscriber")
+	}
+
+	if args.ID == "" && args.Query == nil {
+		return fmt.Errorf("subscription is not fully defined [subscriber=%q]", args.Subscriber)
+	}
+
+	return nil
+}
+
+type cmd struct {
+	op operation
+
+	// subscribe, unsubscribe
+	query        Query
+	subscription *Subscription
+	clientID     string
+
+	// publish
+	msg    interface{}
+	events []types.Event
+}
+
 // Server allows clients to subscribe/unsubscribe for messages, publishing
-// messages with or without tags, and manages internal state.
+// messages with or without events, and manages internal state.
 type Server struct {
-	cmn.BaseService
+	service.BaseService
 
 	cmds    chan cmd
 	cmdsCap int
 
-	mtx           sync.RWMutex
-	subscriptions map[string]map[string]Query // subscriber -> query (string) -> Query
+	// check if we have subscription before
+	// subscribing or unsubscribing
+	mtx tmsync.RWMutex
+
+	// subscriber -> [query->id (string) OR id->query (string))],
+	//   track connections both by ID (new) and query (legacy) to
+	//   avoid breaking the interface.
+	subscriptions map[string]map[string]string
 }
 
 // Option sets a parameter for the server.
 type Option func(*Server)
-
-// TagMap is used to associate tags to a message.
-// They can be queried by subscribers to choose messages they will received.
-type TagMap interface {
-	// Get returns the value for a key, or nil if no value is present.
-	// The ok result indicates whether value was found in the tags.
-	Get(key string) (value string, ok bool)
-	// Len returns the number of tags.
-	Len() int
-}
-
-type tagMap map[string]string
-
-var _ TagMap = (*tagMap)(nil)
-
-// NewTagMap constructs a new immutable tag set from a map.
-func NewTagMap(data map[string]string) TagMap {
-	return tagMap(data)
-}
-
-// Get returns the value for a key, or nil if no value is present.
-// The ok result indicates whether value was found in the tags.
-func (ts tagMap) Get(key string) (value string, ok bool) {
-	value, ok = ts[key]
-	return
-}
-
-// Len returns the number of tags.
-func (ts tagMap) Len() int {
-	return len(ts)
-}
 
 // NewServer returns a new server. See the commentary on the Option functions
 // for a detailed description of how to configure buffering. If no options are
 // provided, the resulting server's queue is unbuffered.
 func NewServer(options ...Option) *Server {
 	s := &Server{
-		subscriptions: make(map[string]map[string]Query),
+		subscriptions: make(map[string]map[string]string),
 	}
-	s.BaseService = *cmn.NewBaseService(nil, "PubSub", s)
+	s.BaseService = *service.NewBaseService(nil, "PubSub", s)
 
 	for _, option := range options {
 		option(s)
@@ -174,11 +163,38 @@ func (s *Server) BufferCapacity() int {
 	return s.cmdsCap
 }
 
-// Subscribe creates a subscription for the given client. It accepts a channel
-// on which messages matching the given query can be received. An error will be
-// returned to the caller if the context is canceled or if subscription already
-// exist for pair clientID and query.
-func (s *Server) Subscribe(ctx context.Context, clientID string, query Query, out chan<- interface{}) error {
+// Subscribe creates a subscription for the given client.
+//
+// An error will be returned to the caller if the context is canceled or if
+// subscription already exist for pair clientID and query.
+//
+// outCapacity can be used to set a capacity for Subscription#Out channel (1 by
+// default). Panics if outCapacity is less than or equal to zero. If you want
+// an unbuffered channel, use SubscribeUnbuffered.
+func (s *Server) Subscribe(
+	ctx context.Context,
+	clientID string,
+	query Query,
+	outCapacity ...int) (*Subscription, error) {
+	outCap := 1
+	if len(outCapacity) > 0 {
+		if outCapacity[0] <= 0 {
+			panic("Negative or zero capacity. Use SubscribeUnbuffered if you want an unbuffered channel")
+		}
+		outCap = outCapacity[0]
+	}
+
+	return s.subscribe(ctx, clientID, query, outCap)
+}
+
+// SubscribeUnbuffered does the same as Subscribe, except it returns a
+// subscription with unbuffered channel. Use with caution as it can freeze the
+// server.
+func (s *Server) SubscribeUnbuffered(ctx context.Context, clientID string, query Query) (*Subscription, error) {
+	return s.subscribe(ctx, clientID, query, 0)
+}
+
+func (s *Server) subscribe(ctx context.Context, clientID string, query Query, outCapacity int) (*Subscription, error) {
 	s.mtx.RLock()
 	clientSubscriptions, ok := s.subscriptions[clientID]
 	if ok {
@@ -186,48 +202,81 @@ func (s *Server) Subscribe(ctx context.Context, clientID string, query Query, ou
 	}
 	s.mtx.RUnlock()
 	if ok {
-		return ErrAlreadySubscribed
+		return nil, ErrAlreadySubscribed
 	}
 
+	subscription := NewSubscription(outCapacity)
 	select {
-	case s.cmds <- cmd{op: sub, clientID: clientID, query: query, ch: out}:
+	case s.cmds <- cmd{op: sub, clientID: clientID, query: query, subscription: subscription}:
 		s.mtx.Lock()
 		if _, ok = s.subscriptions[clientID]; !ok {
-			s.subscriptions[clientID] = make(map[string]Query)
+			s.subscriptions[clientID] = make(map[string]string)
 		}
-		// preserve original query
-		// see Unsubscribe
-		s.subscriptions[clientID][query.String()] = query
+		s.subscriptions[clientID][query.String()] = subscription.id
+		s.subscriptions[clientID][subscription.id] = query.String()
 		s.mtx.Unlock()
-		return nil
+		return subscription, nil
 	case <-ctx.Done():
-		return ctx.Err()
+		return nil, ctx.Err()
 	case <-s.Quit():
-		return nil
+		return nil, nil
 	}
 }
 
 // Unsubscribe removes the subscription on the given query. An error will be
 // returned to the caller if the context is canceled or if subscription does
 // not exist.
-func (s *Server) Unsubscribe(ctx context.Context, clientID string, query Query) error {
-	var origQuery Query
-	s.mtx.RLock()
-	clientSubscriptions, ok := s.subscriptions[clientID]
-	if ok {
-		origQuery, ok = clientSubscriptions[query.String()]
+func (s *Server) Unsubscribe(ctx context.Context, args UnsubscribeArgs) error {
+	if err := args.Validate(); err != nil {
+		return err
 	}
-	s.mtx.RUnlock()
-	if !ok {
-		return ErrSubscriptionNotFound
+	var qs string
+
+	if args.Query != nil {
+		qs = args.Query.String()
 	}
 
-	// original query is used here because we're using pointers as map keys
+	clientSubscriptions, err := func() (map[string]string, error) {
+		s.mtx.RLock()
+		defer s.mtx.RUnlock()
+
+		clientSubscriptions, ok := s.subscriptions[args.Subscriber]
+		if args.ID != "" {
+			qs, ok = clientSubscriptions[args.ID]
+
+			if ok && args.Query == nil {
+				var err error
+				args.Query, err = query.New(qs)
+				if err != nil {
+					return nil, err
+				}
+			}
+		} else if qs != "" {
+			args.ID, ok = clientSubscriptions[qs]
+		}
+
+		if !ok {
+			return nil, ErrSubscriptionNotFound
+		}
+
+		return clientSubscriptions, nil
+	}()
+
+	if err != nil {
+		return err
+	}
+
 	select {
-	case s.cmds <- cmd{op: unsub, clientID: clientID, query: origQuery}:
+	case s.cmds <- cmd{op: unsub, clientID: args.Subscriber, query: args.Query, subscription: &Subscription{id: args.ID}}:
 		s.mtx.Lock()
-		delete(clientSubscriptions, query.String())
-		s.mtx.Unlock()
+		defer s.mtx.Unlock()
+
+		delete(clientSubscriptions, args.ID)
+		delete(clientSubscriptions, qs)
+
+		if len(clientSubscriptions) == 0 {
+			delete(s.subscriptions, args.Subscriber)
+		}
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -249,8 +298,10 @@ func (s *Server) UnsubscribeAll(ctx context.Context, clientID string) error {
 	select {
 	case s.cmds <- cmd{op: unsub, clientID: clientID}:
 		s.mtx.Lock()
+		defer s.mtx.Unlock()
+
 		delete(s.subscriptions, clientID)
-		s.mtx.Unlock()
+
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -259,18 +310,32 @@ func (s *Server) UnsubscribeAll(ctx context.Context, clientID string) error {
 	}
 }
 
+// NumClients returns the number of clients.
+func (s *Server) NumClients() int {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+	return len(s.subscriptions)
+}
+
+// NumClientSubscriptions returns the number of subscriptions the client has.
+func (s *Server) NumClientSubscriptions(clientID string) int {
+	s.mtx.RLock()
+	defer s.mtx.RUnlock()
+	return len(s.subscriptions[clientID]) / 2
+}
+
 // Publish publishes the given message. An error will be returned to the caller
 // if the context is canceled.
 func (s *Server) Publish(ctx context.Context, msg interface{}) error {
-	return s.PublishWithTags(ctx, msg, NewTagMap(make(map[string]string)))
+	return s.PublishWithEvents(ctx, msg, []types.Event{})
 }
 
-// PublishWithTags publishes the given message with the set of tags. The set is
-// matched with clients queries. If there is a match, the message is sent to
+// PublishWithEvents publishes the given message with the set of events. The set
+// is matched with clients queries. If there is a match, the message is sent to
 // the client.
-func (s *Server) PublishWithTags(ctx context.Context, msg interface{}, tags TagMap) error {
+func (s *Server) PublishWithEvents(ctx context.Context, msg interface{}, events []types.Event) error {
 	select {
-	case s.cmds <- cmd{op: pub, msg: msg, tags: tags}:
+	case s.cmds <- cmd{op: pub, msg: msg, events: events}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -286,17 +351,24 @@ func (s *Server) OnStop() {
 
 // NOTE: not goroutine safe
 type state struct {
-	// query -> client -> ch
-	queries map[Query]map[string]chan<- interface{}
-	// client -> query -> struct{}
-	clients map[string]map[Query]struct{}
+	// query string -> client -> subscription
+	subscriptions map[string]map[string]*Subscription
+	// query string -> queryPlusRefCount
+	queries map[string]*queryPlusRefCount
+}
+
+// queryPlusRefCount holds a pointer to a query and reference counter. When
+// refCount is zero, query will be removed.
+type queryPlusRefCount struct {
+	q        Query
+	refCount int
 }
 
 // OnStart implements Service.OnStart by starting the server.
 func (s *Server) OnStart() error {
 	go s.loop(state{
-		queries: make(map[Query]map[string]chan<- interface{}),
-		clients: make(map[string]map[Query]struct{}),
+		subscriptions: make(map[string]map[string]*Subscription),
+		queries:       make(map[string]*queryPlusRefCount),
 	})
 	return nil
 }
@@ -312,88 +384,144 @@ loop:
 		switch cmd.op {
 		case unsub:
 			if cmd.query != nil {
-				state.remove(cmd.clientID, cmd.query)
+				state.remove(cmd.clientID, cmd.query.String(), cmd.subscription.id, ErrUnsubscribed)
 			} else {
-				state.removeAll(cmd.clientID)
+				state.removeClient(cmd.clientID, ErrUnsubscribed)
 			}
 		case shutdown:
-			for clientID := range state.clients {
-				state.removeAll(clientID)
-			}
+			state.removeAll(nil)
 			break loop
 		case sub:
-			state.add(cmd.clientID, cmd.query, cmd.ch)
+			state.add(cmd.clientID, cmd.query, cmd.subscription)
 		case pub:
-			state.send(cmd.msg, cmd.tags)
+			if err := state.send(cmd.msg, cmd.events); err != nil {
+				s.Logger.Error("Error querying for events", "err", err)
+			}
 		}
 	}
 }
 
-func (state *state) add(clientID string, q Query, ch chan<- interface{}) {
+func (state *state) add(clientID string, q Query, subscription *Subscription) {
+	qStr := q.String()
 
-	// initialize clientToChannelMap per query if needed
-	if _, ok := state.queries[q]; !ok {
-		state.queries[q] = make(map[string]chan<- interface{})
+	// initialize subscription for this client per query if needed
+	if _, ok := state.subscriptions[qStr]; !ok {
+		state.subscriptions[qStr] = make(map[string]*Subscription)
+	}
+
+	if _, ok := state.subscriptions[subscription.id]; !ok {
+		state.subscriptions[subscription.id] = make(map[string]*Subscription)
 	}
 
 	// create subscription
-	state.queries[q][clientID] = ch
+	state.subscriptions[qStr][clientID] = subscription
+	state.subscriptions[subscription.id][clientID] = subscription
 
-	// add client if needed
-	if _, ok := state.clients[clientID]; !ok {
-		state.clients[clientID] = make(map[Query]struct{})
+	// initialize query if needed
+	if _, ok := state.queries[qStr]; !ok {
+		state.queries[qStr] = &queryPlusRefCount{q: q, refCount: 0}
 	}
-	state.clients[clientID][q] = struct{}{}
+	// increment reference counter
+	state.queries[qStr].refCount++
 }
 
-func (state *state) remove(clientID string, q Query) {
-	clientToChannelMap, ok := state.queries[q]
+func (state *state) remove(clientID string, qStr, id string, reason error) {
+	clientSubscriptions, ok := state.subscriptions[qStr]
 	if !ok {
 		return
 	}
 
-	ch, ok := clientToChannelMap[clientID]
-	if ok {
-		close(ch)
-
-		delete(state.clients[clientID], q)
-
-		// if it not subscribed to anything else, remove the client
-		if len(state.clients[clientID]) == 0 {
-			delete(state.clients, clientID)
-		}
-
-		delete(state.queries[q], clientID)
-		if len(state.queries[q]) == 0 {
-			delete(state.queries, q)
-		}
-	}
-}
-
-func (state *state) removeAll(clientID string) {
-	queryMap, ok := state.clients[clientID]
+	subscription, ok := clientSubscriptions[clientID]
 	if !ok {
 		return
 	}
 
-	for q := range queryMap {
-		ch := state.queries[q][clientID]
-		close(ch)
+	subscription.cancel(reason)
 
-		delete(state.queries[q], clientID)
-		if len(state.queries[q]) == 0 {
-			delete(state.queries, q)
+	// remove client from query map.
+	// if query has no other clients subscribed, remove it.
+	delete(state.subscriptions[qStr], clientID)
+	delete(state.subscriptions[id], clientID)
+	if len(state.subscriptions[qStr]) == 0 {
+		delete(state.subscriptions, qStr)
+	}
+
+	// decrease ref counter in queries
+	if ref, ok := state.queries[qStr]; ok {
+		ref.refCount--
+		if ref.refCount == 0 {
+			// remove the query if nobody else is using it
+			delete(state.queries, qStr)
 		}
 	}
-	delete(state.clients, clientID)
 }
 
-func (state *state) send(msg interface{}, tags TagMap) {
-	for q, clientToChannelMap := range state.queries {
-		if q.Matches(tags) {
-			for _, ch := range clientToChannelMap {
-				ch <- msg
+func (state *state) removeClient(clientID string, reason error) {
+	seen := map[string]struct{}{}
+	for qStr, clientSubscriptions := range state.subscriptions {
+		if sub, ok := clientSubscriptions[clientID]; ok {
+			if _, ok = seen[sub.id]; ok {
+				// all subscriptions are double indexed by ID and query, only
+				// process them once.
+				continue
+			}
+			state.remove(clientID, qStr, sub.id, reason)
+			seen[sub.id] = struct{}{}
+		}
+	}
+}
+
+func (state *state) removeAll(reason error) {
+	for qStr, clientSubscriptions := range state.subscriptions {
+		sub, ok := clientSubscriptions[qStr]
+		if !ok || ok && sub.id == qStr {
+			// all subscriptions are double indexed by ID and query, only
+			// process them once.
+			continue
+		}
+
+		for clientID := range clientSubscriptions {
+			state.remove(clientID, qStr, sub.id, reason)
+		}
+	}
+}
+
+func (state *state) send(msg interface{}, events []types.Event) error {
+	for qStr, clientSubscriptions := range state.subscriptions {
+		if sub, ok := clientSubscriptions[qStr]; ok && sub.id == qStr {
+			continue
+		}
+		var q Query
+		if qi, ok := state.queries[qStr]; ok {
+			q = qi.q
+		} else {
+			continue
+		}
+
+		match, err := q.Matches(events)
+		if err != nil {
+			return fmt.Errorf("failed to match against query %s: %w", q.String(), err)
+		}
+
+		if match {
+			for clientID, subscription := range clientSubscriptions {
+				if cap(subscription.out) == 0 {
+					// block on unbuffered channel
+					select {
+					case subscription.out <- NewMessage(subscription.id, msg, events):
+					case <-subscription.canceled:
+					}
+				} else {
+					// don't block on buffered channels
+					select {
+					case subscription.out <- NewMessage(subscription.id, msg, events):
+					default:
+						state.remove(clientID, qStr, subscription.id, ErrOutOfCapacity)
+					}
+				}
 			}
 		}
 	}
+
+	return nil
 }

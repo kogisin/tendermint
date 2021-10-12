@@ -2,6 +2,7 @@
 set -e
 
 # Get the root directory.
+export PATH="$GOBIN:$PATH"
 SOURCE="${BASH_SOURCE[0]}"
 while [ -h "$SOURCE" ] ; do SOURCE="$(readlink "$SOURCE")"; done
 DIR="$( cd -P "$( dirname "$SOURCE" )/../.." && pwd )"
@@ -36,7 +37,6 @@ function testExample() {
 }
 
 testExample 1 tests/test_cli/ex1.abci abci-cli kvstore
-testExample 2 tests/test_cli/ex2.abci abci-cli counter
 
 echo ""
 echo "PASS"

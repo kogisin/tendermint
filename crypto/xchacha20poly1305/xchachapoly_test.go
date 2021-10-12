@@ -2,8 +2,8 @@ package xchacha20poly1305
 
 import (
 	"bytes"
-	cr "crypto/rand"
-	mr "math/rand"
+	crand "crypto/rand"
+	mrand "math/rand"
 	"testing"
 )
 
@@ -19,14 +19,26 @@ func TestRandom(t *testing.T) {
 		var nonce [24]byte
 		var key [32]byte
 
-		al := mr.Intn(128)
-		pl := mr.Intn(16384)
+		al := mrand.Intn(128)
+		pl := mrand.Intn(16384)
 		ad := make([]byte, al)
 		plaintext := make([]byte, pl)
-		cr.Read(key[:])
-		cr.Read(nonce[:])
-		cr.Read(ad)
-		cr.Read(plaintext)
+		_, err := crand.Read(key[:])
+		if err != nil {
+			t.Errorf("error on read: %w", err)
+		}
+		_, err = crand.Read(nonce[:])
+		if err != nil {
+			t.Errorf("error on read: %w", err)
+		}
+		_, err = crand.Read(ad)
+		if err != nil {
+			t.Errorf("error on read: %w", err)
+		}
+		_, err = crand.Read(plaintext)
+		if err != nil {
+			t.Errorf("error on read: %w", err)
+		}
 
 		aead, err := New(key[:])
 		if err != nil {
@@ -37,41 +49,41 @@ func TestRandom(t *testing.T) {
 
 		plaintext2, err := aead.Open(nil, nonce[:], ct, ad)
 		if err != nil {
-			t.Errorf("Random #%d: Open failed", i)
+			t.Errorf("random #%d: Open failed", i)
 			continue
 		}
 
 		if !bytes.Equal(plaintext, plaintext2) {
-			t.Errorf("Random #%d: plaintext's don't match: got %x vs %x", i, plaintext2, plaintext)
+			t.Errorf("random #%d: plaintext's don't match: got %x vs %x", i, plaintext2, plaintext)
 			continue
 		}
 
 		if len(ad) > 0 {
-			alterAdIdx := mr.Intn(len(ad))
+			alterAdIdx := mrand.Intn(len(ad))
 			ad[alterAdIdx] ^= 0x80
 			if _, err := aead.Open(nil, nonce[:], ct, ad); err == nil {
-				t.Errorf("Random #%d: Open was successful after altering additional data", i)
+				t.Errorf("random #%d: Open was successful after altering additional data", i)
 			}
 			ad[alterAdIdx] ^= 0x80
 		}
 
-		alterNonceIdx := mr.Intn(aead.NonceSize())
+		alterNonceIdx := mrand.Intn(aead.NonceSize())
 		nonce[alterNonceIdx] ^= 0x80
 		if _, err := aead.Open(nil, nonce[:], ct, ad); err == nil {
-			t.Errorf("Random #%d: Open was successful after altering nonce", i)
+			t.Errorf("random #%d: Open was successful after altering nonce", i)
 		}
 		nonce[alterNonceIdx] ^= 0x80
 
-		alterCtIdx := mr.Intn(len(ct))
+		alterCtIdx := mrand.Intn(len(ct))
 		ct[alterCtIdx] ^= 0x80
 		if _, err := aead.Open(nil, nonce[:], ct, ad); err == nil {
-			t.Errorf("Random #%d: Open was successful after altering ciphertext", i)
+			t.Errorf("random #%d: Open was successful after altering ciphertext", i)
 		}
 		ct[alterCtIdx] ^= 0x80
 	}
 }
 
-// AFOREMENTIONED LICENCE
+// AFOREMENTIONED LICENSE
 // Copyright (c) 2009 The Go Authors. All rights reserved.
 //
 // Redistribution and use in source and binary forms, with or without
